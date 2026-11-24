@@ -64,7 +64,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
-              lz4 cpio kmod git curl zip file dwarves libdw-dev
+              lz4 cpio kmod git curl zip file dwarves libdw-dev zlib1g-dev
           pahole --version
 
       - name: Verify commit is public
@@ -243,6 +243,8 @@ jobs:
           esac
 
           make LLVM=1 ARCH=arm64 O=out gki_defconfig
+          
+          ./scripts/config --file out/.config -d DEBUG_INFO_COMPRESSED_ZSTD -e DEBUG_INFO_COMPRESSED_NONE
 
           if [ "$BTF" != "y" ]; then
             ./scripts/config --file out/.config -d DEBUG_INFO_BTF
