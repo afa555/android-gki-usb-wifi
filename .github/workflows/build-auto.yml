@@ -245,6 +245,7 @@ jobs:
           make LLVM=1 ARCH=arm64 O=out gki_defconfig
           
           ./scripts/config --file out/.config -d DEBUG_INFO_COMPRESSED_ZSTD -e DEBUG_INFO_COMPRESSED_NONE
+          ./scripts/config --file out/.config -e CFI_CLANG -e SHADOW_CALL_STACK -e CFI_ICALL_NORMALIZE_INTEGERS -e ARM64_PTR_AUTH -e ARM64_PTR_AUTH_KERNEL -d CFI_PERMISSIVE
 
           if [ "$BTF" != "y" ]; then
             ./scripts/config --file out/.config -d DEBUG_INFO_BTF
@@ -256,6 +257,7 @@ jobs:
           esac
 
           make LLVM=1 ARCH=arm64 O=out olddefconfig
+          for o in CFI_CLANG SHADOW_CALL_STACK CFI_ICALL_NORMALIZE_INTEGERS; do grep -q "^CONFIG_$o=y" out/.config || { echo "::error::$o not enabled"; exit 1; }; done
           echo "--- result ---"
           grep -E "CONFIG_(CFG80211=|MAC80211=|MT76|RT2X00|RT2800|ATH9K|RTL8XXXU|DEBUG_INFO_BTF|LTO_CLANG)" out/.config || true
 
