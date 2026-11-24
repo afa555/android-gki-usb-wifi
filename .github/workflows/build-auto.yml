@@ -104,6 +104,15 @@ jobs:
           rm -f k.tar.gz
           ls ks/Makefile && head -3 ks/Makefile
 
+      - name: Fix gendwarfksyms (skip files with no exports)
+        working-directory: ks
+        run: |
+          sed -i 's|^void symbol_read_exports(FILE \*file);$|int symbol_read_exports(FILE *file);|' scripts/gendwarfksyms/gendwarfksyms.h
+          sed -i 's|^void symbol_read_exports(FILE \*file)$|int symbol_read_exports(FILE *file)|' scripts/gendwarfksyms/symbols.c
+          sed -i 's|^\tdebug("%d exported symbols", nsym);$|\tdebug("%d exported symbols", nsym);\n\n\treturn nsym;|' scripts/gendwarfksyms/symbols.c
+          sed -i 's|^\tsymbol_read_exports(stdin);$|\tif (!symbol_read_exports(stdin))\n\t\treturn 0;|' scripts/gendwarfksyms/gendwarfksyms.c
+          
+
       - name: Patch drivers for GKI KMI limits
         working-directory: ks
         env:
