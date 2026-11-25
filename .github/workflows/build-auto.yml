@@ -218,7 +218,8 @@ jobs:
           export RUST_LIB_SRC="$RUST_SYSROOT/lib/rustlib/src/rust/library"
           export BINDGEN="$(command -v bindgen)"
           export LOCALVERSION=
-          make LLVM=1 ARCH=arm64 O=out -j$(nproc)
+          export LDFLAGS_MODULE="-z max-page-size=16384"
+          make LLVM=1 ARCH=arm64 O=out LDFLAGS_MODULE="$LDFLAGS_MODULE" -j$(nproc)
 
       - name: Build out-of-tree Realtek driver
         if: ${{ github.event.inputs.driver == 'rtl88xxau_oot' }}
@@ -261,6 +262,7 @@ jobs:
           cp ks/out/Module.symvers ko/ 2>/dev/null || true
           cp ks/out/.config ko/device-build.config 2>/dev/null || true
           cp ks/out/include/config/kernel.release ko/kernel.release 2>/dev/null || true
+          for f in ko/*.ko; do llvm-strip --strip-debug "$f" || true; done
           echo "--- collected ---"; ls -la ko/
 
       - name: Patch module CRCs to device values
