@@ -253,7 +253,7 @@ jobs:
           mkdir -p ko
           # in-tree
           find ks/out -name "*.ko" \( \
-            -name "mac80211.ko" -o -name "cfg80211.ko" -o \
+            -name "mac80211.ko" -o -name "cfg80211.ko" -o -name "libarc4.ko" -o \
             -name "mt76*.ko" -o -name "mt7601u.ko" -o -name "rt2*.ko" -o -name "rt2800*.ko" -o \
             -name "ath*.ko" -o -name "rtl8xxxu.ko" \) -exec cp {} ko/ \; || true
           # out-of-tree (if built)
@@ -359,7 +359,8 @@ jobs:
 
           # modules from the collected ko/ dir
           cp ko/*.ko "$PKG/modules/" 2>/dev/null || true
-          rm -f "$PKG/modules/cfg80211.ko"   # never ship a custom cfg80211
+          # NX809J stock kernel has CONFIG_CFG80211=n and CONFIG_CRYPTO_LIB_ARC4=m,
+          # so mac80211 cannot resolve cfg80211_* / arc4_* until these load first.
           cp ko/Module.symvers "$PKG/modules/" 2>/dev/null || true
 
           # firmware (fetched from linux-firmware)
