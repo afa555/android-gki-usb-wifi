@@ -12,9 +12,9 @@ on:
         required: true
         default: "android16-6.12-2025-06_r8"
       clang_ver:
-        description: "Android Clang version (r547379 matches NX809J /proc/version)."
+        description: "Android Clang version (r536225 matches NX809J device.config /proc/version)."
         required: true
-        default: "clang-r547379"
+        default: "clang-r536225"
       module_layout_crc:
         description: "Device module_layout CRC to patch into all .ko files"
         required: true
@@ -172,20 +172,20 @@ jobs:
           export LOCALVERSION=
           mkdir -p out
           touch abi_symbollist.raw
-          make LLVM=1 ARCH=arm64 O=out gki_defconfig
+          cp "$GITHUB_WORKSPACE/device.config" out/.config
           ./scripts/config --file out/.config \
             -e MODULES -e MODVERSIONS -e KPROBES -e KALLSYMS_ALL \
             -e CFI_CLANG -d LTO_CLANG_FULL -d LTO_CLANG_THIN -e LTO_NONE \
             -e CFI_ICALL_NORMALIZE_INTEGERS \
-            -e MODULE_SIG -e MODULE_SIG_SHA256 -d MODULE_SIG_SHA1 -d MODULE_SIG_FORCE \
             -e DEBUG_INFO_BTF -e RUST \
             -e WLAN -m CFG80211 -m MAC80211 -e WLAN_VENDOR_MEDIATEK \
             -k -m MT76_CORE -m MT76_USB -m MT76x02_LIB -m MT76x02_USB \
             -m MT76x2_COMMON -m MT76x2U
+          ./scripts/config --file out/.config --set-str MODULE_SIG_PROTECT_LIST ""
           ./scripts/config --file out/.config --set-str LOCALVERSION "-android16-5-gf1bdb13583da-ab13761046-4k"
           ./scripts/config --file out/.config -d LOCALVERSION_AUTO
           make LLVM=1 ARCH=arm64 O=out olddefconfig
-          grep -E "CONFIG_(CFG80211=|MAC80211=|MT76|MODVERSIONS=|CFI_CLANG=|CFI_ICALL_NORMALIZE_INTEGERS=|MODULE_SIG=|MODULE_SIG_SHA256=|LTO_NONE=|DEBUG_INFO_BTF=|RUST=|LOCALVERSION)" out/.config || true
+          grep -E "CONFIG_(CFG80211=|MAC80211=|MT76|MODVERSIONS=|CFI_CLANG=|CFI_ICALL_NORMALIZE_INTEGERS=|MODULE_SIG=|MODULE_SIG_SHA1=|MODULE_SIG_SHA256=|MODULE_SIG_PROTECT=|TRIM_UNUSED_KSYMS=|LTO_NONE=|DEBUG_INFO_BTF=|RUST=|LOCALVERSION|CC_VERSION_TEXT)" out/.config || true
 
       - name: Prepare kernel for external modules
         working-directory: ks
