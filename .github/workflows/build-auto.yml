@@ -10,7 +10,7 @@ on:
       kcommit:
         description: "Kernel branch/tag to check out"
         required: true
-        default: "android16-6.12"
+        default: "android16-6.12-2025-06_r8"
       clang_ver:
         description: "Android Clang version (r547379 matches NX809J /proc/version)."
         required: true
@@ -265,7 +265,7 @@ jobs:
 
       - name: Patch module_layout CRC to device value
         run: |
-          python3 - "$GITHUB_WORKSPACE/ko" "$GITHUB_WORKSPACE/ks/out/Module.symvers" "${{ github.event.inputs.module_layout_crc }}" <<'PY'
+          python3 - "$GITHUB_WORKSPACE/ko" "$GITHUB_WORKSPACE/ko/Module.symvers" "${{ github.event.inputs.module_layout_crc }}" <<'PY'
           import pathlib, re, struct, sys
           kodir = pathlib.Path(sys.argv[1])
           symvers = pathlib.Path(sys.argv[2])
