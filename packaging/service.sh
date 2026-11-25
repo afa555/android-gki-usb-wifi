@@ -44,7 +44,8 @@ fi
 
 # 3) load modules with USB autoprobe OFF so module_init never touches the HW
 echo 0 > /sys/bus/usb/drivers_autoprobe 2>/dev/null
-for m in "$KMOD"/mac80211.ko "$KMOD"/mt76.ko "$KMOD"/mt76-usb.ko \
+for m in "$KMOD"/libarc4.ko "$KMOD"/cfg80211.ko "$KMOD"/mac80211.ko \
+         "$KMOD"/mt76.ko "$KMOD"/mt76-usb.ko \
          "$KMOD"/mt76x02-lib.ko "$KMOD"/mt76x02-usb.ko \
          "$KMOD"/mt76x2-common.ko "$KMOD"/*.ko ; do
   [ -e "$m" ] || continue
