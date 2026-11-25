@@ -65,6 +65,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y bc bison flex libssl-dev libelf-dev \
               lz4 cpio kmod git curl zip file dwarves libdw-dev zlib1g-dev
+          sudo apt-get install -y cmake libbpf-dev pkg-config
+          git clone --depth 1 -b v1.27 https://github.com/acmel/dwarves.git /tmp/dwarves
+          sed -i 's/cmake_minimum_required(VERSION 2.8.12)/cmake_minimum_required(VERSION 3.5)/' /tmp/dwarves/CMakeLists.txt
+          cmake -S /tmp/dwarves -B /tmp/dwarves/build \
+            -D__LIB=lib -DLIBBPF_EMBEDDED=OFF -DCMAKE_BUILD_TYPE=Release
+          make -C /tmp/dwarves/build -j$(nproc)
+          sudo make -C /tmp/dwarves/build install
+          hash -r
           pahole --version
 
       - name: Verify commit is public
@@ -179,87 +187,17 @@ jobs:
 
       - name: Configure
         working-directory: ks
-        env:
-          DRIVER: ${{ github.event.inputs.driver }}
-          BTF: ${{ github.event.inputs.btf }}
-          LTO: ${{ github.event.inputs.lto }}
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
-
-          # Base symbols every path needs
-          {
-            echo "CONFIG_WLAN=y"
-            echo "CONFIG_CFG80211=m"
-            echo "CONFIG_USB=y"
-          } >> arch/arm64/configs/gki_defconfig
-
-          # mac80211 is needed by every driver EXCEPT the Realtek out-of-tree one,
-          # which ships its own stack. Add it unless that path is chosen.
-          if [ "$DRIVER" != "rtl88xxau_oot" ]; then
-            echo "CONFIG_MAC80211=m" >> arch/arm64/configs/gki_defconfig
-          fi
-
-          # Driver-specific in-tree symbols
-          case "$DRIVER" in
-            mt76x2u)
-              printf '%s\n' \
-                CONFIG_WLAN_VENDOR_MEDIATEK=y \
-                CONFIG_MT76_CORE=m CONFIG_MT76_USB=m \
-                CONFIG_MT76x02_LIB=m CONFIG_MT76x02_USB=m \
-                CONFIG_MT76x2_COMMON=m CONFIG_MT76x2U=m >> arch/arm64/configs/gki_defconfig ;;
-            mt76x0u)
-              printf '%s\n' \
-                CONFIG_WLAN_VENDOR_MEDIATEK=y \
-                CONFIG_MT76_CORE=m CONFIG_MT76_USB=m \
-                CONFIG_MT76x02_LIB=m CONFIG_MT76x02_USB=m \
-                CONFIG_MT76x0_COMMON=m CONFIG_MT76x0U=m >> arch/arm64/configs/gki_defconfig ;;
-            mt7601u)
-              printf '%s\n' \
-                CONFIG_WLAN_VENDOR_MEDIATEK=y \
-                CONFIG_MT7601U=m >> arch/arm64/configs/gki_defconfig ;;
-            rt2800usb)
-              printf '%s\n' \
-                CONFIG_WLAN_VENDOR_RALINK=y \
-                CONFIG_RT2X00=m CONFIG_RT2X00_LIB_USB=m \
-                CONFIG_RT2800USB=m \
-                CONFIG_RT2800USB_RT33XX=y CONFIG_RT2800USB_RT35XX=y \
-                CONFIG_RT2800USB_RT3573=y CONFIG_RT2800USB_RT53XX=y \
-                CONFIG_RT2800USB_RT55XX=y CONFIG_RT2800USB_UNKNOWN=y >> arch/arm64/configs/gki_defconfig ;;
-            ath9k_htc)
-              printf '%s\n' \
-                CONFIG_WLAN_VENDOR_ATH=y \
-                CONFIG_ATH9K_HW=m CONFIG_ATH9K_COMMON=m CONFIG_ATH9K_HTC=m >> arch/arm64/configs/gki_defconfig ;;
-            rtl8xxxu)
-              # in-tree Realtek USB (RTL8188/8192 CU/EU/RU etc.)
-              printf '%s\n' \
-                CONFIG_WLAN_VENDOR_REALTEK=y \
-                CONFIG_RTL8XXXU=m CONFIG_RTL8XXXU_UNTESTED=y >> arch/arm64/configs/gki_defconfig ;;
-            rtl88xxau_oot)
-              # out-of-tree (RTL8812AU/8814AU/8821AU) - built in a later step.
-              # Only mac80211/cfg80211 base is needed here; driver brings the rest.
-              echo "CONFIG_MAC80211=m" >> arch/arm64/configs/gki_defconfig ;;
-            *)
-              echo "::error::Unknown driver $DRIVER"; exit 1 ;;
-          esac
-
-          make LLVM=1 ARCH=arm64 O=out gki_defconfig
-          
+          mkdir -p out
+          cp "$GITHUB_WORKSPACE/device.config" out/.config
+          ./scripts/config --file out/.config -e WLAN -m CFG80211 -m MAC80211 \
+            -e WLAN_VENDOR_MEDIATEK -m MT76_CORE -m MT76_USB \
+            -m MT76x02_LIB -m MT76x02_USB -m MT76x2_COMMON -m MT76x2U
+          ./scripts/config --file out/.config --set-str MODULE_SIG_PROTECT_LIST ""
           ./scripts/config --file out/.config -d DEBUG_INFO_COMPRESSED_ZSTD -e DEBUG_INFO_COMPRESSED_NONE
-          ./scripts/config --file out/.config -e CFI_CLANG -e SHADOW_CALL_STACK -e CFI_ICALL_NORMALIZE_INTEGERS -e ARM64_PTR_AUTH -e ARM64_PTR_AUTH_KERNEL -d CFI_PERMISSIVE
-
-          if [ "$BTF" != "y" ]; then
-            ./scripts/config --file out/.config -d DEBUG_INFO_BTF
-          fi
-          case "$LTO" in
-            thin) ./scripts/config --file out/.config -d LTO_CLANG_FULL -e LTO_CLANG_THIN ;;
-            none) ./scripts/config --file out/.config -d LTO_CLANG_FULL -d LTO_CLANG_THIN -e LTO_NONE ;;
-            *)    : ;;
-          esac
-
           make LLVM=1 ARCH=arm64 O=out olddefconfig
-          for o in CFI_CLANG SHADOW_CALL_STACK CFI_ICALL_NORMALIZE_INTEGERS; do grep -q "^CONFIG_$o=y" out/.config || { echo "::error::$o not enabled"; exit 1; }; done
-          echo "--- result ---"
-          grep -E "CONFIG_(CFG80211=|MAC80211=|MT76|RT2X00|RT2800|ATH9K|RTL8XXXU|DEBUG_INFO_BTF|LTO_CLANG)" out/.config || true
+          grep -E "CONFIG_(CFG80211=|MAC80211=|MT76|DEBUG_INFO_BTF=|MODULE_SIG_PROTECT|PINCTRL=|SWIOTLB=)" out/.config || true
 
       - name: Prepare kernel for external modules
         working-directory: ks
