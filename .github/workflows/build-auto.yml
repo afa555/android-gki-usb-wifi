@@ -263,47 +263,75 @@ jobs:
           cp ks/out/include/config/kernel.release ko/kernel.release 2>/dev/null || true
           echo "--- collected ---"; ls -la ko/
 
-      - name: Patch module_layout CRC to device value
+      - name: Patch module CRCs to device values
         run: |
-          python3 - "$GITHUB_WORKSPACE/ko" "$GITHUB_WORKSPACE/ko/Module.symvers" "${{ github.event.inputs.module_layout_crc }}" <<'PY'
-          import pathlib, re, struct, sys
+          python3 - "$GITHUB_WORKSPACE/ko" "$GITHUB_WORKSPACE/ko/Module.symvers" "$GITHUB_WORKSPACE/device-crcs.txt" "${{ github.event.inputs.module_layout_crc }}" <<'PY'
+          import pathlib, struct, sys
           kodir = pathlib.Path(sys.argv[1])
           symvers = pathlib.Path(sys.argv[2])
-          want = int(sys.argv[3], 16)
-          name = b"module_layout"
-          def version_entry_offsets(data):
-              found = []
-              for m in re.finditer(re.escape(name), data):
-                  off = m.start()
-                  if off < 4 or off + 56 > len(data):
+          crcfile = pathlib.Path(sys.argv[3])
+          want = {}
+          for line in crcfile.read_text().splitlines():
+              parts = line.split()
+              if len(parts) >= 2:
+                  want[parts[1]] = int(parts[0], 16)
+          want["module_layout"] = int(sys.argv[4], 16)
+          def version_span(data):
+              if data[:4] != b"\x7fELF" or data[4] != 2:
+                  return None
+              shoff = struct.unpack_from("<Q", data, 0x28)[0]
+              shentsize, shnum, shstrndx = struct.unpack_from("<HHH", data, 0x3a)
+              shstr = struct.unpack_from("<IIQQQQIIQQ", data, shoff + shstrndx * shentsize)
+              names = data[shstr[4]:shstr[4] + shstr[5]]
+              for i in range(shnum):
+                  sh = struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize)
+                  n = sh[0]
+                  end = names.find(b"\0", n)
+                  if names[n:end] == b"__versions":
+                      return sh[4], sh[5]
+              return None
+          def patch_ko(path):
+              data = bytearray(path.read_bytes())
+              span = version_span(bytes(data))
+              if not span:
+                  return 0
+              off, size = span
+              patched = 0
+              for pos in range(off, off + size, 64):
+                  field = data[pos + 8:pos + 64]
+                  end = field.find(b"\0")
+                  if end <= 0:
                       continue
-                  field = data[off:off + 56]
-                  if field[len(name):] == b"\x00" * (56 - len(name)):
-                      found.append(off - 4)
-              return found
+                  sym = field[:end].decode(errors="replace")
+                  if sym in want:
+                      struct.pack_into("<Q", data, pos, want[sym])
+                      patched += 1
+              if patched:
+                  path.write_bytes(data)
+              return patched
           patched = 0
           for ko in sorted(kodir.glob("*.ko")):
-              data = bytearray(ko.read_bytes())
-              hits = version_entry_offsets(bytes(data))
-              for off in hits:
-                  if off >= 0:
-                      struct.pack_into("<I", data, off, want)
-              if hits:
-                  ko.write_bytes(data)
-                  patched += 1
-                  print(f"patched {ko.name}: {len(hits)} entr{'y' if len(hits) == 1 else 'ies'}")
+              n = patch_ko(ko)
+              patched += 1 if n else 0
+              if n:
+                  print(f"patched {ko.name}: {n} version entries")
           if symvers.exists():
-              text = symvers.read_text(errors="replace")
-              text, n = re.subn(
-                  r"(?m)^(\S+)\s+module_layout\s+vmlinux\s+EXPORT_SYMBOL.*$",
-                  f"{want:#010x}\tmodule_layout\tvmlinux\tEXPORT_SYMBOL",
-                  text,
-              )
-              symvers.write_text(text)
-              print(f"patched Module.symvers: {n} lines")
+              lines = []
+              changed = 0
+              for line in symvers.read_text(errors="replace").splitlines():
+                  parts = line.split("\t")
+                  if len(parts) >= 2 and parts[1] in want:
+                      crc = int(parts[0], 16)
+                      if crc != want[parts[1]]:
+                          parts[0] = f"{want[parts[1]]:#010x}"
+                          line = "\t".join(parts)
+                          changed += 1
+                  lines.append(line)
+              symvers.write_text("\n".join(lines) + "\n")
+              print(f"patched Module.symvers: {changed} lines")
           if patched == 0:
-              raise SystemExit("no .ko contained a module_layout version entry")
-          print(f"target module_layout = {hex(want)}")
+              raise SystemExit("no .ko contained a __versions section")
+          print(f"device CRC map: {len(want)} symbols")
           PY
 
       - name: Package Magisk/KernelSU module
