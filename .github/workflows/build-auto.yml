@@ -183,7 +183,8 @@ jobs:
           cp "$GITHUB_WORKSPACE/vendor-kernel/stock_config" out/.config
           ./scripts/config --file out/.config -e WLAN -m CFG80211 -m MAC80211 \
             -e WLAN_VENDOR_MEDIATEK -m MT76_CORE -m MT76_USB \
-            -k -m MT76x02_LIB -m MT76x02_USB -m MT76x2_COMMON -m MT76x2U
+            -k -m MT76x02_LIB -m MT76x02_USB -m MT76x2_COMMON -m MT76x2U \
+            -d KSU -d KSU_DEBUG -d KSU_DISABLE_MANAGER -d KSU_DISABLE_POLICY
           ./scripts/config --file out/.config --set-str MODULE_SIG_PROTECT_LIST ""
           ./scripts/config --file out/.config --set-str LOCALVERSION "-android16-5-gf1bdb13583da-ab13761046-4k"
           ./scripts/config --file out/.config -d LOCALVERSION_AUTO
