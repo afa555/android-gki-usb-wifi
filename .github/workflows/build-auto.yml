@@ -359,6 +359,8 @@ jobs:
           PKG="pkg"
           rm -rf "$PKG"; mkdir -p "$PKG/modules" "$PKG/firmware" "$PKG/META-INF/com/google/android"
 
+          # device-exact stock 80211 stack: same vermagic and module_layout CRC
+          cp prebuilt/libarc4.ko prebuilt/cfg80211.ko prebuilt/mac80211.ko ko/ 2>/dev/null || true
           # modules from the collected ko/ dir
           cp ko/*.ko "$PKG/modules/" 2>/dev/null || true
           # NX809J stock kernel has CONFIG_CFG80211=n and CONFIG_CRYPTO_LIB_ARC4=m,
