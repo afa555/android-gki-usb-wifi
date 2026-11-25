@@ -4,17 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       ksrc_repo:
-        description: "Vendor kernel source repo (full tree under kernel_platform/common)"
+        description: "Kernel source repo (GKI common for loadable KCFI modules)"
         required: true
-        default: "https://github.com/Coding-BR/android_kernel_nubia_sm8850_qwjujube"
+        default: "https://android.googlesource.com/kernel/common"
       kcommit:
-        description: "Vendor kernel commit/tag to check out"
+        description: "Kernel branch/tag to check out"
         required: true
-        default: "efee6f411184886b0fbdaf63fc9db36b3ed96036"
+        default: "android16-6.12"
       clang_ver:
-        description: "Android Clang version (e.g. clang-r536225)."
+        description: "Android Clang version (r547379 matches NX809J /proc/version)."
         required: true
-        default: "clang-r536225"
+        default: "clang-r547379"
+      module_layout_crc:
+        description: "Device module_layout CRC to patch into all .ko files"
+        required: true
+        default: "0xe976b219"
       btf:
         description: "Keep CONFIG_DEBUG_INFO_BTF? (y = device has BTF=y)"
         required: true
@@ -50,6 +54,7 @@ jobs:
           echo "clang   = ${{ github.event.inputs.clang_ver }}"
           echo "btf     = ${{ github.event.inputs.btf }}"
           echo "lto     = ${{ github.event.inputs.lto }}"
+          echo "crc     = ${{ github.event.inputs.module_layout_crc }}"
           echo "driver  = ${{ github.event.inputs.driver }}"
 
       - name: Free disk space
@@ -84,26 +89,13 @@ jobs:
           rustc --version
           bindgen --version
 
-      - name: Fetch vendor kernel source
+      - name: Fetch GKI kernel source
         run: |
           set -e
-          git clone --filter=blob:none --no-checkout "${{ github.event.inputs.ksrc_repo }}" vendor-kernel
-          cd vendor-kernel
-          git sparse-checkout init --cone
-          git sparse-checkout set kernel_platform/common
-          git checkout "${{ github.event.inputs.kcommit }}"
-          cd ..
-          ln -s vendor-kernel/kernel_platform/common ks
+          git clone --depth 1 -b "${{ github.event.inputs.kcommit }}" \
+            "${{ github.event.inputs.ksrc_repo }}" ks
           test -f ks/Makefile
           head -3 ks/Makefile
-      - name: Fix gendwarfksyms (skip files with no exports)
-        working-directory: ks
-        run: |
-          sed -i 's|^void symbol_read_exports(FILE \*file);$|int symbol_read_exports(FILE *file);|' scripts/gendwarfksyms/gendwarfksyms.h
-          sed -i 's|^void symbol_read_exports(FILE \*file)$|int symbol_read_exports(FILE *file)|' scripts/gendwarfksyms/symbols.c
-          sed -i 's|^\tdebug("%d exported symbols", nsym);$|\tdebug("%d exported symbols", nsym);\n\n\treturn nsym;|' scripts/gendwarfksyms/symbols.c
-          sed -i 's|^\tsymbol_read_exports(stdin);$|\tif (!symbol_read_exports(stdin))\n\t\treturn 0;|' scripts/gendwarfksyms/gendwarfksyms.c
-          
 
       - name: Patch drivers for GKI KMI limits
         working-directory: ks
@@ -169,7 +161,7 @@ jobs:
           sh -n packaging/service.sh && echo "service.sh OK"
           sh -n packaging/action.sh && echo "action.sh OK"
 
-      - name: Configure
+      - name: Configure (NX809J load gauntlet)
         working-directory: ks
         run: |
           export PATH=$GITHUB_WORKSPACE/clang/bin:$HOME/.cargo/bin:$PATH
@@ -180,16 +172,20 @@ jobs:
           export LOCALVERSION=
           mkdir -p out
           touch abi_symbollist.raw
-          cp "$GITHUB_WORKSPACE/vendor-kernel/stock_config" out/.config
-          ./scripts/config --file out/.config -e WLAN -m CFG80211 -m MAC80211 \
-            -e WLAN_VENDOR_MEDIATEK -m MT76_CORE -m MT76_USB \
-            -k -m MT76x02_LIB -m MT76x02_USB -m MT76x2_COMMON -m MT76x2U \
-            -d KSU -d KSU_DEBUG -d KSU_DISABLE_MANAGER -d KSU_DISABLE_POLICY
-          ./scripts/config --file out/.config --set-str MODULE_SIG_PROTECT_LIST ""
+          make LLVM=1 ARCH=arm64 O=out gki_defconfig
+          ./scripts/config --file out/.config \
+            -e MODULES -e MODVERSIONS -e KPROBES -e KALLSYMS_ALL \
+            -e CFI_CLANG -d LTO_CLANG_FULL -d LTO_CLANG_THIN -e LTO_NONE \
+            -e CFI_ICALL_NORMALIZE_INTEGERS \
+            -e MODULE_SIG -e MODULE_SIG_SHA256 -d MODULE_SIG_SHA1 -d MODULE_SIG_FORCE \
+            -e DEBUG_INFO_BTF -e RUST \
+            -e WLAN -m CFG80211 -m MAC80211 -e WLAN_VENDOR_MEDIATEK \
+            -m MT76_CORE -m MT76_USB -m MT76x02_LIB -m MT76x02_USB \
+            -m MT76x2_COMMON -m MT76x2U
           ./scripts/config --file out/.config --set-str LOCALVERSION "-android16-5-gf1bdb13583da-ab13761046-4k"
           ./scripts/config --file out/.config -d LOCALVERSION_AUTO
           make LLVM=1 ARCH=arm64 O=out olddefconfig
-          grep -E "CONFIG_(CFG80211=|MAC80211=|MT76|DEBUG_INFO_BTF=|RUST=|LOCALVERSION|MODULE_SIG_PROTECT|PINCTRL=|SWIOTLB=)" out/.config || true
+          grep -E "CONFIG_(CFG80211=|MAC80211=|MT76|MODVERSIONS=|CFI_CLANG=|CFI_ICALL_NORMALIZE_INTEGERS=|MODULE_SIG=|MODULE_SIG_SHA256=|LTO_NONE=|DEBUG_INFO_BTF=|RUST=|LOCALVERSION)" out/.config || true
 
       - name: Prepare kernel for external modules
         working-directory: ks
@@ -200,8 +196,9 @@ jobs:
           export RUST_LIB_SRC="$RUST_SYSROOT/lib/rustlib/src/rust/library"
           export BINDGEN="$(command -v bindgen)"
           export LOCALVERSION=
-          # modules_prepare lets out-of-tree drivers build against this config
-          make LLVM=1 ARCH=arm64 O=out modules_prepare
+          # olddefconfig updates .config but not auto.conf; this drives KCFI flags
+          make LLVM=1 ARCH=arm64 O=out modules_prepare prepare scripts -j$(nproc)
+          grep -E "CONFIG_(CFG80211=|MAC80211=|MT76|MODVERSIONS=|CFI_CLANG=|CFI_ICALL_NORMALIZE_INTEGERS=|MODULE_SIG=|MODULE_SIG_SHA256=|LTO_NONE=)" out/.config || true
 
       - name: Add swap
         run: |
@@ -262,7 +259,52 @@ jobs:
           # out-of-tree (if built)
           find oot -name "*.ko" -exec cp {} ko/ \; 2>/dev/null || true
           cp ks/out/Module.symvers ko/ 2>/dev/null || true
+          cp ks/out/.config ko/device-build.config 2>/dev/null || true
+          cp ks/out/include/config/kernel.release ko/kernel.release 2>/dev/null || true
           echo "--- collected ---"; ls -la ko/
+
+      - name: Patch module_layout CRC to device value
+        run: |
+          python3 - "$GITHUB_WORKSPACE/ko" "$GITHUB_WORKSPACE/ks/out/Module.symvers" "${{ github.event.inputs.module_layout_crc }}" <<'PY'
+          import pathlib, re, struct, sys
+          kodir = pathlib.Path(sys.argv[1])
+          symvers = pathlib.Path(sys.argv[2])
+          want = int(sys.argv[3], 16)
+          name = b"module_layout"
+          def version_entry_offsets(data):
+              found = []
+              for m in re.finditer(re.escape(name), data):
+                  off = m.start()
+                  if off < 4 or off + 56 > len(data):
+                      continue
+                  field = data[off:off + 56]
+                  if field[len(name):] == b"\x00" * (56 - len(name)):
+                      found.append(off - 4)
+              return found
+          patched = 0
+          for ko in sorted(kodir.glob("*.ko")):
+              data = bytearray(ko.read_bytes())
+              hits = version_entry_offsets(bytes(data))
+              for off in hits:
+                  if off >= 0:
+                      struct.pack_into("<I", data, off, want)
+              if hits:
+                  ko.write_bytes(data)
+                  patched += 1
+                  print(f"patched {ko.name}: {len(hits)} entr{'y' if len(hits) == 1 else 'ies'}")
+          if symvers.exists():
+              text = symvers.read_text(errors="replace")
+              text, n = re.subn(
+                  r"(?m)^(\S+)\s+module_layout\s+vmlinux\s+EXPORT_SYMBOL.*$",
+                  f"{want:#010x}\tmodule_layout\tvmlinux\tEXPORT_SYMBOL",
+                  text,
+              )
+              symvers.write_text(text)
+              print(f"patched Module.symvers: {n} lines")
+          if patched == 0:
+              raise SystemExit("no .ko contained a module_layout version entry")
+          print(f"target module_layout = {hex(want)}")
+          PY
 
       - name: Package Magisk/KernelSU module
         id: pkg
