@@ -15,10 +15,14 @@ on:
         description: "Android Clang version (r536225 matches NX809J device.config /proc/version)."
         required: true
         default: "clang-r536225"
-      module_layout_crc:
-        description: "Device module_layout CRC to patch into all .ko files"
+      crc_source:
+        description: "CRC map source: vmlinux (build's own, self-consistent) | device (device-crcs.txt override)"
         required: true
-        default: "0xe976b219"
+        default: "vmlinux"
+      module_layout_crc:
+        description: "Only with crc_source=device: override module_layout CRC"
+        required: false
+        default: ""
       btf:
         description: "Keep CONFIG_DEBUG_INFO_BTF? (y = device has BTF=y)"
         required: true
@@ -221,6 +225,24 @@ jobs:
           export LDFLAGS_MODULE="-z max-page-size=16384"
           make LLVM=1 ARCH=arm64 O=out LDFLAGS_MODULE="$LDFLAGS_MODULE" -j$(nproc)
 
+      - name: Extract __crc_* from vmlinux
+        run: |
+          set -e
+          test -f ks/out/vmlinux || { echo "::error::ks/out/vmlinux not found"; exit 1; }
+          # Absolute __crc_* symbols carry the CRC the kernel expects for each
+          # exported symbol. nm prints them as "<value> A __crc_<name>".
+          nm ks/out/vmlinux | awk '$3 ~ /^__crc_/ {v=$1; sub(/^__crc_/,"",$3); print v" "$3}' \
+            | sort -u > crc_map.txt
+          echo "CRC symbols extracted from vmlinux: $(wc -l < crc_map.txt)"
+          grep -qE ' module_layout$' crc_map.txt \
+            || { echo "::error::module_layout CRC missing from vmlinux"; exit 1; }
+          echo "--- sample ---"; head -5 crc_map.txt
+          if [ "${{ github.event.inputs.crc_source }}" = "device" ]; then
+            test -f device-crcs.txt || { echo "::error::crc_source=device but device-crcs.txt is missing"; exit 1; }
+            echo "overriding with device-crcs.txt ($(wc -l < device-crcs.txt) symbols)"
+            cat device-crcs.txt >> crc_map.txt
+          fi
+
       - name: Build out-of-tree Realtek driver
         if: ${{ github.event.inputs.driver == 'rtl88xxau_oot' }}
         env:
@@ -267,19 +289,50 @@ jobs:
           for f in ko/*.ko; do llvm-strip --strip-debug "$f"; done
           echo "--- collected ---"; ls -la ko/
 
-      - name: Patch module CRCs to device values
+      - name: Patch module CRCs from crc_map.txt
         run: |
-          python3 - "$GITHUB_WORKSPACE/ko" "$GITHUB_WORKSPACE/ko/Module.symvers" "$GITHUB_WORKSPACE/device-crcs.txt" "${{ github.event.inputs.module_layout_crc }}" <<'PY'
+          python3 - "$GITHUB_WORKSPACE/ko" "$GITHUB_WORKSPACE/crc_map.txt" \
+                   "$GITHUB_WORKSPACE/ko/Module.symvers" "$GITHUB_WORKSPACE/device-crcs.txt" \
+                   "${{ github.event.inputs.crc_source }}" "${{ github.event.inputs.module_layout_crc }}" <<'PY'
           import pathlib, struct, sys
           kodir = pathlib.Path(sys.argv[1])
-          symvers = pathlib.Path(sys.argv[2])
-          crcfile = pathlib.Path(sys.argv[3])
-          want = {}
-          for line in crcfile.read_text().splitlines():
-              parts = line.split()
-              if len(parts) >= 2:
-                  want[parts[1]] = int(parts[0], 16)
-          want["module_layout"] = int(sys.argv[4], 16)
+          crcfile = pathlib.Path(sys.argv[2])
+          symvers = pathlib.Path(sys.argv[3])
+          devfile = pathlib.Path(sys.argv[4])
+          source = sys.argv[5]
+          ml_crc = sys.argv[6].strip()
+
+          def read_map(path):
+              m = {}
+              if path.exists():
+                  for line in path.read_text(errors="replace").splitlines():
+                      p = line.split()
+                      if len(p) >= 2:
+                          try:
+                              m[p[1]] = int(p[0], 16)
+                          except ValueError:
+                              pass
+              return m
+
+          # Which symbols are exported by the kernel image itself (not by a
+          # sibling module we are shipping). Only those need the device's CRCs;
+          # symbols exported by our own .ko are consistent within the set.
+          vmlinux_exports = set()
+          if symvers.exists():
+              for line in symvers.read_text(errors="replace").splitlines():
+                  p = line.split("\t")
+                  if len(p) >= 3 and p[2] == "vmlinux":
+                      vmlinux_exports.add(p[1])
+
+          if source == "device":
+              want = read_map(devfile)
+              if ml_crc:
+                  want["module_layout"] = int(ml_crc, 16)
+              print(f"CRC source: device-crcs.txt ({len(want)} symbols)")
+          else:
+              want = read_map(crcfile)
+              print(f"CRC source: vmlinux ({len(want)} symbols)")
+
           def version_span(data):
               if data[:4] != b"\x7fELF" or data[4] != 2:
                   return None
@@ -294,48 +347,53 @@ jobs:
                   if names[n:end] == b"__versions":
                       return sh[4], sh[5]
               return None
-          def patch_ko(path):
-              data = bytearray(path.read_bytes())
+
+          total_changed = 0
+          missing_all = {}
+          unknown = set()
+          for ko in sorted(kodir.glob("*.ko")):
+              data = bytearray(ko.read_bytes())
               span = version_span(bytes(data))
               if not span:
-                  return 0
+                  print(f"{ko.name}: no __versions section")
+                  continue
               off, size = span
-              patched = 0
+              changed = missing = 0
               for pos in range(off, off + size, 64):
                   field = data[pos + 8:pos + 64]
                   end = field.find(b"\0")
                   if end <= 0:
                       continue
                   sym = field[:end].decode(errors="replace")
-                  if sym in want:
+                  if sym not in vmlinux_exports:
+                      # exported by a sibling module (or unknown); leave it alone
+                      if sym not in want:
+                          unknown.add(sym)
+                      continue
+                  if sym not in want:
+                      missing += 1
+                      missing_all.setdefault(sym, set()).add(ko.name)
+                      continue
+                  if struct.unpack_from("<Q", data, pos)[0] != want[sym]:
                       struct.pack_into("<Q", data, pos, want[sym])
-                      patched += 1
-              if patched:
-                  path.write_bytes(data)
-              return patched
-          patched = 0
-          for ko in sorted(kodir.glob("*.ko")):
-              n = patch_ko(ko)
-              patched += 1 if n else 0
-              if n:
-                  print(f"patched {ko.name}: {n} version entries")
-          if symvers.exists():
-              lines = []
-              changed = 0
-              for line in symvers.read_text(errors="replace").splitlines():
-                  parts = line.split("\t")
-                  if len(parts) >= 2 and parts[1] in want:
-                      crc = int(parts[0], 16)
-                      if crc != want[parts[1]]:
-                          parts[0] = f"{want[parts[1]]:#010x}"
-                          line = "\t".join(parts)
-                          changed += 1
-                  lines.append(line)
-              symvers.write_text("\n".join(lines) + "\n")
-              print(f"patched Module.symvers: {changed} lines")
-          if patched == 0:
-              raise SystemExit("no .ko contained a __versions section")
-          print(f"device CRC map: {len(want)} symbols")
+                      changed += 1
+              if changed:
+                  ko.write_bytes(data)
+              total_changed += changed
+              print(f"{ko.name}: entries={size // 64} changed={changed} missing={missing}")
+
+          if missing_all:
+              print(f"::error::{len(missing_all)} kernel-exported symbols used by these modules are absent from the CRC map:")
+              for sym in sorted(missing_all)[:40]:
+                  print(f"   {sym}  <- {','.join(sorted(missing_all[sym]))}")
+              print("::error::Supply a complete device CRC map (crc_source=device) or fix the kernel source/config.")
+              raise SystemExit(1)
+          print(f"CRC values rewritten: {total_changed} (map has {len(want)} symbols)")
+          if total_changed == 0:
+              print("::warning::The CRC map already equals the values embedded in the .ko.")
+              print("::warning::If the device still reports 'disagrees about version of symbol',")
+              print("::warning::the build source/config does not match the running kernel;")
+              print("::warning::you must supply the device's real CRCs (crc_source=device).")
           PY
 
       - name: Package Magisk/KernelSU module
