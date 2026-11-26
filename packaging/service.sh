@@ -44,6 +44,7 @@ fi
 
 # 3) load modules with USB autoprobe OFF so module_init never touches the HW
 echo 0 > /sys/bus/usb/drivers_autoprobe 2>/dev/null
+LOAD_OK=0; LOAD_FAIL=0
 for m in "$KMOD"/libarc4.ko "$KMOD"/cfg80211.ko "$KMOD"/mac80211.ko \
          "$KMOD"/mt76.ko "$KMOD"/mt76-usb.ko \
          "$KMOD"/mt76x02-lib.ko "$KMOD"/mt76x02-usb.ko \
@@ -51,9 +52,14 @@ for m in "$KMOD"/libarc4.ko "$KMOD"/cfg80211.ko "$KMOD"/mac80211.ko \
   [ -e "$m" ] || continue
   base=$(basename "$m" .ko); lsn=$(echo "$base" | tr '-' '_')
   lsmod | grep -q "^$lsn " && continue
-  insmod "$m" 2>/dev/null && log "loaded $base"
+  if err=$(insmod "$m" 2>&1); then
+    log "loaded $base"; LOAD_OK=$((LOAD_OK+1))
+  else
+    log "FAILED $base: $err"; LOAD_FAIL=$((LOAD_FAIL+1))
+  fi
 done
 echo 1 > /sys/bus/usb/drivers_autoprobe 2>/dev/null
+log "load summary: ok=$LOAD_OK failed=$LOAD_FAIL"
 
 # 4) if the card is already attached, bind it now (firmware upload happens here,
 #    outside module_init → watchdog can't fire). Retry with USB reset on timeout.
@@ -68,7 +74,11 @@ dev=$(find_dev)
 if [ -z "$dev" ]; then
   # No card at boot (the normal case). Skip binding, but DO continue to the
   # monitor-mode watcher below - it waits for wlan1 to show up on plug-in.
-  log "card not attached; modules ready, will bind on plug-in"
+  if [ "$LOAD_FAIL" -gt 0 ]; then
+    log "card not attached; $LOAD_FAIL module(s) FAILED to load - see FAILED lines above (check dmesg: 'disagrees about version')"
+  else
+    log "card not attached; modules ready, will bind on plug-in"
+  fi
 else
 
 attempt=1
