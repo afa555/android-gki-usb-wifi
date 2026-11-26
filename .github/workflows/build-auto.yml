@@ -225,21 +225,23 @@ jobs:
           export LDFLAGS_MODULE="-z max-page-size=16384"
           make LLVM=1 ARCH=arm64 O=out LDFLAGS_MODULE="$LDFLAGS_MODULE" -j$(nproc)
 
-      - name: Extract __crc_* from vmlinux
+      - name: Build CRC map from the freshly built kernel
         run: |
           set -e
-          test -f ks/out/vmlinux || { echo "::error::ks/out/vmlinux not found"; exit 1; }
-          # Absolute __crc_* symbols carry the CRC the kernel expects for each
-          # exported symbol. nm prints them as "<value> A __crc_<name>".
-          nm ks/out/vmlinux | awk '$3 ~ /^__crc_/ {v=$1; sub(/^__crc_/,"",$3); print v" "$3}' \
-            | sort -u > crc_map.txt
-          echo "CRC symbols extracted from vmlinux: $(wc -l < crc_map.txt)"
+          test -f ks/out/Module.symvers || { echo "::error::ks/out/Module.symvers not found"; exit 1; }
+          # Module.symvers is the authoritative (CRC, symbol, exporter) list for
+          # this build. IMPORTANT: nm's __crc_* are *data* symbols holding a
+          # pointer/offset (nm prints an address, e.g. 0xffffffc0...), NOT the
+          # CRC value. Using nm's first column here wrote addresses into the
+          # .ko and broke them, so the values must come from Module.symvers.
+          awk -F'\t' '$3=="vmlinux" {print $1" "$2}' ks/out/Module.symvers | sort -u > crc_map.txt
+          echo "vmlinux-exported symbols in map: $(wc -l < crc_map.txt)"
           grep -qE ' module_layout$' crc_map.txt \
-            || { echo "::error::module_layout CRC missing from vmlinux"; exit 1; }
-          echo "--- sample ---"; head -5 crc_map.txt
+            || { echo "::error::module_layout CRC missing from the map"; exit 1; }
+          echo "module_layout (build): $(awk '$2=="module_layout"{print $1}' crc_map.txt)"
           if [ "${{ github.event.inputs.crc_source }}" = "device" ]; then
             test -f device-crcs.txt || { echo "::error::crc_source=device but device-crcs.txt is missing"; exit 1; }
-            echo "overriding with device-crcs.txt ($(wc -l < device-crcs.txt) symbols)"
+            echo "device-crcs.txt override symbols: $(wc -l < device-crcs.txt)"
             cat device-crcs.txt >> crc_map.txt
           fi
 
@@ -332,6 +334,15 @@ jobs:
           else:
               want = read_map(crcfile)
               print(f"CRC source: vmlinux ({len(want)} symbols)")
+
+          # Safety rail: CRCs are 32-bit. Anything bigger is a kernel address
+          # (e.g. from misreading nm output) and must never be written into a .ko.
+          oversized = {s: v for s, v in want.items() if v > 0xFFFFFFFF}
+          if oversized:
+              print(f"::error::{len(oversized)} map entries look like addresses, not CRCs:")
+              for s in sorted(oversized)[:20]:
+                  print(f"   {s} = {oversized[s]:#x}")
+              raise SystemExit(1)
 
           def version_span(data):
               if data[:4] != b"\x7fELF" or data[4] != 2:
